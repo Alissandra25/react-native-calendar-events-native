@@ -22,7 +22,6 @@ import androidx.core.content.ContextCompat;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
-import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
@@ -37,8 +36,8 @@ import java.util.Locale;
 import java.util.TimeZone;
 
 @ReactModule(name = CalendarEventsNativeModule.NAME)
-public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
-    public static final String NAME = "CalendarEventsNative";
+public class CalendarEventsNativeModule extends NativeCalendarEventsNativeSpecSpec {
+    public static final String NAME = "RNCalendarEventsNativeSpec";
     private static final SimpleDateFormat ISO_8601_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
     
     static {
@@ -55,7 +54,26 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         return NAME;
     }
 
+    @Override
+    @ReactMethod
+    public void debugModuleMethods(Promise promise) {
+        WritableArray methods = Arguments.createArray();
+        methods.pushString("requestPermissions");
+        methods.pushString("checkPermissions");
+        methods.pushString("fetchAllCalendars");
+        methods.pushString("findOrCreateCalendar");
+        methods.pushString("removeCalendar");
+        methods.pushString("fetchAllEvents");
+        methods.pushString("findEventById");
+        methods.pushString("saveEvent");
+        methods.pushString("updateEvent");
+        methods.pushString("removeEvent");
+        methods.pushString("openEventInCalendar");
+        promise.resolve(methods);
+    }
+
     // Permission methods
+    @Override
     @ReactMethod
     public void requestPermissions(boolean writeOnly, Promise promise) {
         // Permission handling is done in JavaScript side using PermissionsAndroid
@@ -63,6 +81,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         checkPermissions(writeOnly, promise);
     }
 
+    @Override
     @ReactMethod
     public void checkPermissions(boolean writeOnly, Promise promise) {
         Context context = getReactApplicationContext();
@@ -79,6 +98,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
     }
 
     // Calendar methods
+    @Override
     @ReactMethod
     public void fetchAllCalendars(Promise promise) {
         ContentResolver cr = getReactApplicationContext().getContentResolver();
@@ -121,21 +141,24 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         promise.resolve(calendars);
     }
 
+    @Override
     @ReactMethod
-    public void findOrCreateCalendar(ReadableMap calendarMap, Promise promise) {
-        String title = calendarMap.hasKey("title") ? calendarMap.getString("title") : "Calendar";
-        
+    public void findOrCreateCalendar(String title, @Nullable String color, @Nullable String entityType, @Nullable String source, Promise promise) {
+        if (title == null || title.isEmpty()) {
+            title = "Calendar";
+        }
+
         // First, try to find existing calendar
         ContentResolver cr = getReactApplicationContext().getContentResolver();
         String[] projection = new String[] { Calendars._ID, Calendars.CALENDAR_DISPLAY_NAME };
-        Cursor cursor = cr.query(Calendars.CONTENT_URI, projection, 
+        Cursor cursor = cr.query(Calendars.CONTENT_URI, projection,
             Calendars.CALENDAR_DISPLAY_NAME + " = ?", new String[] { title }, null);
-        
+
         if (cursor != null && cursor.moveToFirst()) {
             String calendarId = cursor.getString(0);
             String displayName = cursor.getString(1);
             cursor.close();
-            
+
             WritableMap result = Arguments.createMap();
             result.putString("id", calendarId);
             result.putString("title", displayName);
@@ -143,15 +166,15 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
             result.putString("type", "local");
             result.putBoolean("isPrimary", false);
             result.putBoolean("allowsModifications", true);
-            
+
             promise.resolve(result);
             return;
         }
-        
+
         if (cursor != null) {
             cursor.close();
         }
-        
+
         // Create new calendar
         ContentValues values = new ContentValues();
         values.put(Calendars.ACCOUNT_NAME, "CalendarEventsNative");
@@ -162,22 +185,21 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         values.put(Calendars.OWNER_ACCOUNT, "CalendarEventsNative");
         values.put(Calendars.VISIBLE, 1);
         values.put(Calendars.SYNC_EVENTS, 1);
-        
-        if (calendarMap.hasKey("color")) {
-            String colorHex = calendarMap.getString("color");
-            int color = (int) Long.parseLong(colorHex.replace("#", ""), 16);
-            values.put(Calendars.CALENDAR_COLOR, color);
+
+        if (color != null && !color.isEmpty()) {
+            int colorInt = (int) Long.parseLong(color.replace("#", ""), 16);
+            values.put(Calendars.CALENDAR_COLOR, colorInt);
         }
-        
+
         Uri.Builder builder = Calendars.CONTENT_URI.buildUpon();
         builder.appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true");
         builder.appendQueryParameter(Calendars.ACCOUNT_NAME, "CalendarEventsNative");
         builder.appendQueryParameter(Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL);
-        
+
         Uri uri = cr.insert(builder.build(), values);
         if (uri != null) {
             String calendarId = uri.getLastPathSegment();
-            
+
             WritableMap result = Arguments.createMap();
             result.putString("id", calendarId);
             result.putString("title", title);
@@ -185,17 +207,18 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
             result.putString("type", "local");
             result.putBoolean("isPrimary", false);
             result.putBoolean("allowsModifications", true);
-            
-            if (calendarMap.hasKey("color")) {
-                result.putString("color", calendarMap.getString("color"));
+
+            if (color != null && !color.isEmpty()) {
+                result.putString("color", color);
             }
-            
+
             promise.resolve(result);
         } else {
             promise.reject("CALENDAR_CREATION_FAILED", "Failed to create calendar");
         }
     }
 
+    @Override
     @ReactMethod
     public void removeCalendar(String calendarId, Promise promise) {
         ContentResolver cr = getReactApplicationContext().getContentResolver();
@@ -205,6 +228,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
     }
 
     // Event methods
+    @Override
     @ReactMethod
     public void fetchAllEvents(String startDate, String endDate, ReadableArray calendarIds, Promise promise) {
         long startMillis = parseDate(startDate);
@@ -253,6 +277,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         promise.resolve(events);
     }
 
+    @Override
     @ReactMethod
     public void findEventById(String eventId, Promise promise) {
         ContentResolver cr = getReactApplicationContext().getContentResolver();
@@ -344,6 +369,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         }
     }
 
+    @Override
     @ReactMethod
     public void removeEvent(String eventId, Promise promise) {
         ContentResolver cr = getReactApplicationContext().getContentResolver();
@@ -352,6 +378,7 @@ public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
         promise.resolve(rows > 0);
     }
 
+    @Override
     @ReactMethod
     public void openEventInCalendar(String eventId, Promise promise) {
         // Android doesn't support opening events directly in the calendar app
