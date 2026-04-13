@@ -1,5 +1,5 @@
 import type { TurboModule } from 'react-native';
-import { TurboModuleRegistry } from 'react-native';
+import { NativeModules, TurboModuleRegistry } from 'react-native';
 
 export interface Spec extends TurboModule {
   debugModuleMethods(): Promise<string>;
@@ -132,4 +132,11 @@ export interface Spec extends TurboModule {
   openEventInCalendar?(eventId: string): Promise<void>;
 }
 
-export default TurboModuleRegistry.getEnforcing<Spec>('RNCalendarEventsNativeSpec');
+const turboModule = TurboModuleRegistry.get<Spec>('RNCalendarEventsNativeSpec');
+
+// Fallback keeps app booting if TurboModule registration is missing in the current binary.
+const bridgedModule =
+  (NativeModules.RNCalendarEventsNativeSpec as Spec | undefined) ??
+  (NativeModules.CalendarEventsNative as Spec | undefined);
+
+export default turboModule ?? bridgedModule ?? null;

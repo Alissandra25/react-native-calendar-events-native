@@ -2,7 +2,7 @@ package com.calendarevents;
 
 import androidx.annotation.Nullable;
 
-import com.facebook.react.TurboReactPackage;
+import com.facebook.react.BaseReactPackage;
 import com.facebook.react.bridge.NativeModule;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.module.model.ReactModuleInfo;
@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 
-public class CalendarEventsNativePackage extends TurboReactPackage {
+public class CalendarEventsNativePackage extends BaseReactPackage {
 
     @Nullable
     @Override

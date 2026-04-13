@@ -1,5 +1,8 @@
 # react-native-calendar-events-native
 
+Forked from [react-native-calendar-events](https://github.com/wix/react-native-calendar-events)
+All credit goes to the original author.
+
 A React Native module for native calendar event creation on iOS and Android, fully compatible with React Native's New Architecture (Fabric/TurboModules).
 
 ## Features

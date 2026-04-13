@@ -22,7 +22,6 @@ import androidx.core.content.ContextCompat;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
-import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
@@ -37,7 +36,7 @@ import java.util.Locale;
 import java.util.TimeZone;
 
 @ReactModule(name = CalendarEventsNativeModule.NAME)
-public class CalendarEventsNativeModule extends ReactContextBaseJavaModule {
+public class CalendarEventsNativeModule extends NativeCalendarEventsNativeSpecSpec {
     public static final String NAME = "RNCalendarEventsNativeSpec";
     private static final SimpleDateFormat ISO_8601_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
 
