@@ -1,6 +1,8 @@
 package com.calendarevents;
 
 import android.Manifest;
+import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
@@ -25,6 +27,7 @@ import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.ReadableType;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.module.annotations.ReactModule;
@@ -57,7 +60,7 @@ public class CalendarEventsNativeModule extends NativeCalendarEventsNativeSpecSp
     // Debug method required by TurboModule spec
     @ReactMethod
     public void debugModuleMethods(Promise promise) {
-        promise.resolve("CalendarEventsNative module methods: debugModuleMethods, requestPermissions, checkPermissions, fetchAllCalendars, findOrCreateCalendar, removeCalendar, fetchAllEvents, findEventById, saveEvent, updateEvent, removeEvent, openEventInCalendar");
+        promise.resolve("CalendarEventsNative module methods: debugModuleMethods, requestPermissions, checkPermissions, fetchAllCalendars, findOrCreateCalendar, removeCalendar, fetchAllEvents, findEventById, saveEvent, openEventEditor, updateEvent, removeEvent, openEventInCalendar");
     }
 
     // Permission methods
@@ -295,6 +298,76 @@ public class CalendarEventsNativeModule extends NativeCalendarEventsNativeSpecSp
         promise.resolve(rows > 0);
     }
 
+    // Opens the system editor without writing to the calendar provider
+    @ReactMethod
+    public void openEventEditor(ReadableMap event, Promise promise) {
+        try {
+            String title = event.getString("title");
+            String startDate = event.getString("startDate");
+            String endDate = event.getString("endDate");
+            boolean allDay = event.hasKey("allDay") && event.getBoolean("allDay");
+            long startMillis = ISO_8601_FORMAT.parse(startDate).getTime();
+            long endMillis = ISO_8601_FORMAT.parse(endDate).getTime();
+            if (endMillis < startMillis) {
+                promise.reject("invalid_event_dates", "Event end date must not be before its start date");
+                return;
+            }
+            if (allDay) {
+                startMillis = CalendarEventDateUtils.toUtcMidnight(startMillis);
+                endMillis = CalendarEventDateUtils.toExclusiveUtcMidnightEnd(startMillis, endMillis);
+            }
+
+            Intent intent = new Intent(Intent.ACTION_INSERT, Events.CONTENT_URI);
+            intent.putExtra(Events.TITLE, title);
+            intent.putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMillis);
+            intent.putExtra(CalendarContract.EXTRA_EVENT_END_TIME, endMillis);
+            if (event.hasKey("location") && !TextUtils.isEmpty(event.getString("location"))) {
+                intent.putExtra(Events.EVENT_LOCATION, event.getString("location"));
+            }
+            if (event.hasKey("notes") && !TextUtils.isEmpty(event.getString("notes"))) {
+                intent.putExtra(Events.DESCRIPTION, event.getString("notes"));
+            }
+            intent.putExtra(CalendarContract.EXTRA_EVENT_ALL_DAY, allDay);
+
+            if (event.hasKey("calendar")) {
+                intent.putExtra(Events.CALENDAR_ID, Long.parseLong(event.getString("calendar")));
+            }
+            if (event.hasKey("availability")) {
+                intent.putExtra(Events.AVAILABILITY, parseAvailability(event.getString("availability")));
+            }
+            if (event.hasKey("recurrence")) {
+                intent.putExtra(Events.RRULE, buildRRule(event.getMap("recurrence")));
+            }
+
+            if (event.hasKey("android")) {
+                ReadableMap androidOptions = event.getMap("android");
+                if (androidOptions != null && androidOptions.hasKey("attendees")) {
+                    String attendees = joinStrings(androidOptions.getArray("attendees"));
+                    if (!TextUtils.isEmpty(attendees)) intent.putExtra(Intent.EXTRA_EMAIL, attendees);
+                }
+            }
+
+            Activity activity = getReactApplicationContext().getCurrentActivity();
+            if (activity != null) {
+                activity.startActivity(intent);
+            } else {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getReactApplicationContext().startActivity(intent);
+            }
+            promise.resolve(null);
+        } catch (ParseException e) {
+            promise.reject("invalid_event_dates", "Event dates must use ISO 8601 format", e);
+        } catch (NumberFormatException e) {
+            promise.reject("invalid_calendar", "Android calendar IDs must be numeric strings", e);
+        } catch (IllegalArgumentException e) {
+            promise.reject("invalid_event_options", e.getMessage(), e);
+        } catch (ActivityNotFoundException e) {
+            promise.reject("event_editor_unavailable", "No calendar app can create this event", e);
+        } catch (Exception e) {
+            promise.reject("open_event_editor_failed", "Failed to open the calendar editor", e);
+        }
+    }
+
     @ReactMethod
     public void openEventInCalendar(String eventId, Promise promise) {
         // Android doesn't support opening events directly in the calendar app
@@ -446,33 +519,132 @@ public class CalendarEventsNativeModule extends NativeCalendarEventsNativeSpecSp
     private String buildRRule(ReadableMap recurrence) {
         StringBuilder rrule = new StringBuilder();
 
-        if (recurrence.hasKey("frequency")) {
-            String frequency = recurrence.getString("frequency");
-            String freq = "DAILY";
-            if ("weekly".equals(frequency)) {
-                freq = "WEEKLY";
-            } else if ("monthly".equals(frequency)) {
-                freq = "MONTHLY";
-            } else if ("yearly".equals(frequency)) {
-                freq = "YEARLY";
-            }
-            rrule.append("FREQ=").append(freq);
+        String frequency = recurrence.hasKey("frequency")
+            && recurrence.getType("frequency") == ReadableType.String
+                ? recurrence.getString("frequency")
+                : null;
+        if (!"daily".equals(frequency) && !"weekly".equals(frequency)
+            && !"monthly".equals(frequency) && !"yearly".equals(frequency)) {
+            throw new IllegalArgumentException("Recurrence frequency must be daily, weekly, monthly, or yearly");
         }
+        rrule.append("FREQ=").append(frequency.toUpperCase(Locale.US));
 
         if (recurrence.hasKey("interval")) {
-            rrule.append(";INTERVAL=").append(recurrence.getInt("interval"));
+            int interval = readInteger(recurrence, "interval", "Recurrence interval must be an integer");
+            if (interval < 1) throw new IllegalArgumentException("Recurrence interval must be greater than zero");
+            rrule.append(";INTERVAL=").append(interval);
         }
 
         if (recurrence.hasKey("endDate")) {
-            long endMillis = parseDate(recurrence.getString("endDate"));
+            long endMillis;
+            try {
+                endMillis = ISO_8601_FORMAT.parse(recurrence.getString("endDate")).getTime();
+            } catch (ParseException e) {
+                throw new IllegalArgumentException("Recurrence end date must use ISO 8601 format", e);
+            }
             SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", Locale.US);
             format.setTimeZone(TimeZone.getTimeZone("UTC"));
             rrule.append(";UNTIL=").append(format.format(new Date(endMillis)));
         } else if (recurrence.hasKey("occurrence")) {
-            rrule.append(";COUNT=").append(recurrence.getInt("occurrence"));
+            int occurrence = readInteger(recurrence, "occurrence", "Recurrence occurrence must be an integer");
+            if (occurrence < 1) throw new IllegalArgumentException("Recurrence occurrence must be greater than zero");
+            rrule.append(";COUNT=").append(occurrence);
         }
 
+        appendDaysOfWeek(rrule, recurrence);
+        appendIntegerArray(rrule, recurrence, "daysOfMonth", "BYMONTHDAY", -31, 31, true);
+        appendIntegerArray(rrule, recurrence, "monthsOfYear", "BYMONTH", 1, 12, false);
+        appendIntegerArray(rrule, recurrence, "daysOfYear", "BYYEARDAY", -366, 366, true);
+
         return rrule.toString();
+    }
+
+    // Maps the shared availability values to CalendarContract constants
+    private int parseAvailability(String availability) {
+        if ("busy".equals(availability)) return Events.AVAILABILITY_BUSY;
+        if ("free".equals(availability)) return Events.AVAILABILITY_FREE;
+        if ("tentative".equals(availability)) return Events.AVAILABILITY_TENTATIVE;
+        throw new IllegalArgumentException("Android availability must be busy, free, or tentative");
+    }
+
+    // Formats Android-only attendee emails for the calendar intent
+    private String joinStrings(@Nullable ReadableArray values) {
+        if (values == null) return "";
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < values.size(); index++) {
+            String value = values.getString(index);
+            if (TextUtils.isEmpty(value)) continue;
+            if (result.length() > 0) result.append(',');
+            result.append(value);
+        }
+        return result.toString();
+    }
+
+    // Converts EventKit weekday numbers to RFC 5545 weekday tokens
+    private void appendDaysOfWeek(StringBuilder rrule, ReadableMap recurrence) {
+        if (!recurrence.hasKey("daysOfWeek")) return;
+        ReadableArray days = recurrence.getArray("daysOfWeek");
+        if (days == null || days.size() == 0) return;
+        String[] tokens = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
+        rrule.append(";BYDAY=");
+        for (int index = 0; index < days.size(); index++) {
+            ReadableMap day = days.getMap(index);
+            int dayOfWeek = readInteger(day, "dayOfWeek", "Recurrence dayOfWeek must be an integer");
+            if (dayOfWeek < 1 || dayOfWeek > 7) {
+                throw new IllegalArgumentException("Recurrence dayOfWeek must be between 1 and 7");
+            }
+            if (index > 0) rrule.append(',');
+            if (day.hasKey("weekNumber")) {
+                int weekNumber = readInteger(day, "weekNumber", "Recurrence weekNumber must be an integer");
+                if (weekNumber == 0 || weekNumber < -53 || weekNumber > 53) {
+                    throw new IllegalArgumentException("Recurrence weekNumber must be between -53 and 53 and cannot be zero");
+                }
+                rrule.append(weekNumber);
+            }
+            rrule.append(tokens[dayOfWeek - 1]);
+        }
+    }
+
+    // Appends a validated integer list to an RFC 5545 recurrence rule
+    private void appendIntegerArray(StringBuilder rrule, ReadableMap recurrence, String key,
+                                    String ruleKey, int minimum, int maximum, boolean disallowZero) {
+        if (!recurrence.hasKey(key)) return;
+        ReadableArray values = recurrence.getArray(key);
+        if (values == null || values.size() == 0) return;
+        rrule.append(';').append(ruleKey).append('=');
+        for (int index = 0; index < values.size(); index++) {
+            int value = readInteger(values, index, "Recurrence " + key + " values must be integers");
+            if (value < minimum || value > maximum || (disallowZero && value == 0)) {
+                throw new IllegalArgumentException("Invalid recurrence value for " + key);
+            }
+            if (index > 0) rrule.append(',');
+            rrule.append(value);
+        }
+    }
+
+    // Reads an integer without truncating a JavaScript number
+    private int readInteger(ReadableMap values, String key, String errorMessage) {
+        if (!values.hasKey(key) || values.getType(key) != ReadableType.Number) {
+            throw new IllegalArgumentException(errorMessage);
+        }
+        return requireInteger(values.getDouble(key), errorMessage);
+    }
+
+    // Reads an array integer without truncating a JavaScript number
+    private int readInteger(ReadableArray values, int index, String errorMessage) {
+        if (values.getType(index) != ReadableType.Number) {
+            throw new IllegalArgumentException(errorMessage);
+        }
+        return requireInteger(values.getDouble(index), errorMessage);
+    }
+
+    // Validates integer range after reading a JavaScript number
+    private int requireInteger(double value, String errorMessage) {
+        if (Double.isNaN(value) || Double.isInfinite(value) || value != Math.rint(value)
+            || value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(errorMessage);
+        }
+        return (int) value;
     }
 
     private WritableMap parseRRule(String rrule) {

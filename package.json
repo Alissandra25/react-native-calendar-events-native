@@ -15,6 +15,7 @@
     "*.podspec"
   ],
   "scripts": {
+    "test": "node --test test/*.test.cjs",
     "prepare": "bob build"
   },
   "author": "Alissandra25",
