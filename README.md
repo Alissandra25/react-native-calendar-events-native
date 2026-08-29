@@ -17,6 +17,12 @@ A React Native module for native calendar event creation on iOS and Android, ful
 - ✅ **Reminders/Alarms** - Add multiple alarms to events
 - ✅ **Event Availability** - Set busy/free/tentative status
 
+## Compatibility
+
+- React Native 0.74 or newer
+- New Architecture required on Android
+- Old and New Architectures supported on iOS
+
 ## Installation
 
 ```sh
@@ -66,8 +72,8 @@ const calendar = await CalendarEvents.findOrCreateCalendar({
 // Create an event
 const eventId = await CalendarEvents.saveEvent({
   title: 'Meeting',
-  startDate: new Date('2024-01-20 10:00'),
-  endDate: new Date('2024-01-20 11:00'),
+  startDate: new Date('2024-01-20T10:00:00'),
+  endDate: new Date('2024-01-20T11:00:00'),
   location: 'Office',
   notes: 'Important meeting',
   alarms: [{ minutes: 15 }], // Reminder 15 minutes before
@@ -148,6 +154,21 @@ Update an existing event.
 
 Remove an event from the calendar.
 
+#### `openEventEditor(event: EventEditorOptions): Promise<void>`
+
+Open the platform calendar editor with a prefilled, unsaved event. The promise resolves when the editor opens and does not return an event ID.
+
+All-day dates use the device's local calendar day. iOS 16 and earlier may request calendar access; calendar preselection also requires access on iOS and depends on the receiving calendar app on Android.
+
+```typescript
+await CalendarEvents.openEventEditor({
+  title: 'Project Planning Meeting',
+  startDate: new Date('2024-01-20T10:00:00'),
+  endDate: new Date('2024-01-20T11:00:00'),
+  location: 'Conference Room',
+});
+```
+
 #### `openEventInCalendar(eventId: string): Promise<void>` (iOS only)
 
 Open an event in the native calendar app.
@@ -191,6 +212,33 @@ interface CalendarAlarm {
 }
 ```
 
+### EventEditorOptions
+
+```typescript
+interface EventEditorOptions {
+  title: string;
+  startDate: string | Date;
+  endDate: string | Date;
+  location?: string;
+  notes?: string;
+  allDay?: boolean;
+  calendar?: string;
+  recurrence?: RecurrenceRule;
+  availability?: 'busy' | 'free' | 'tentative';
+  ios?: {
+    url?: string;
+    alarms?: Array<
+      | { date: string | Date; minutes?: never }
+      | { minutes: number; date?: never }
+    >;
+    availability?: 'unavailable';
+  };
+  android?: {
+    attendees?: string[];
+  };
+}
+```
+
 ### RecurrenceRule
 
 ```typescript
@@ -208,6 +256,8 @@ interface RecurrenceRule {
   daysOfYear?: number[];
 }
 ```
+
+`dayOfWeek` is 1-based, where `1` is Sunday and `7` is Saturday. Negative `weekNumber` values count backward from the end of the month or year.
 
 ### Calendar
 
@@ -231,8 +281,8 @@ interface Calendar {
 ```typescript
 const eventId = await CalendarEvents.saveEvent({
   title: 'Weekly Team Meeting',
-  startDate: new Date('2024-01-20 10:00'),
-  endDate: new Date('2024-01-20 11:00'),
+  startDate: new Date('2024-01-20T10:00:00'),
+  endDate: new Date('2024-01-20T11:00:00'),
   recurrence: {
     frequency: 'weekly',
     interval: 1,
@@ -259,7 +309,7 @@ const eventId = await CalendarEvents.saveEvent({
 ## Platform Differences
 
 - **iOS**: Supports opening events in the native calendar app via `openEventInCalendar()`
-- **Android**: Calendar creation requires specifying account details
+- **Android**: Direct calendar creation requires specifying account details
 - **iOS 17+**: Uses new full access calendar permissions
 
 ## Contributing

@@ -1,4 +1,5 @@
 import type { TurboModule } from 'react-native';
+import type { UnsafeObject } from 'react-native/Libraries/Types/CodegenTypes';
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 
 export interface Spec extends TurboModule {
@@ -129,6 +130,7 @@ export interface Spec extends TurboModule {
     calendarId: string
   ): Promise<string>;
   removeEvent(eventId: string): Promise<boolean>;
+  openEventEditor(event: UnsafeObject): Promise<void>;
   openEventInCalendar?(eventId: string): Promise<void>;
 }
 

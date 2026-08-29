@@ -2,10 +2,44 @@
 #import <EventKit/EventKit.h>
 #import <EventKitUI/EventKitUI.h>
 #import <React/RCTConvert.h>
+#import <React/RCTUtils.h>
+#import <math.h>
+#import <stdint.h>
 
 #ifdef RCT_NEW_ARCH_ENABLED
 // JSI headers are included automatically by the framework
 #endif
+
+// Accept expected Foundation types only across the unsafe bridge
+static BOOL HasValue(id value) {
+    return value != nil && value != [NSNull null];
+}
+
+static NSString *StringOrNil(id value) {
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static NSDictionary *DictOrNil(id value) {
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+static NSArray *ArrayOrNil(id value) {
+    return [value isKindOfClass:[NSArray class]] ? value : nil;
+}
+
+static NSNumber *NumberOrNil(id value) {
+    return [value isKindOfClass:[NSNumber class]] ? value : nil;
+}
+
+// Accept finite integer numbers but not bridged booleans
+static NSNumber *IntegerNumberOrNil(id value) {
+    NSNumber *number = NumberOrNil(value);
+    if (!number || CFGetTypeID((__bridge CFTypeRef)number) == CFBooleanGetTypeID()) return nil;
+    double doubleValue = number.doubleValue;
+    if (!isfinite(doubleValue) || floor(doubleValue) != doubleValue
+        || doubleValue < INT32_MIN || doubleValue > INT32_MAX) return nil;
+    return number;
+}
 
 @interface CalendarEventsNative () <EKEventEditViewDelegate>
 @property (nonatomic, strong) EKEventStore *eventStore;
@@ -39,7 +73,7 @@ RCT_EXPORT_MODULE(RNCalendarEventsNativeSpec)
 RCT_EXPORT_METHOD(debugModuleMethods:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
     NSLog(@"🔍 CalendarEventsNative: Module methods available!");
-    NSLog(@"🔍 Available methods: requestPermissions, checkPermissions, fetchAllCalendars, findOrCreateCalendar, removeCalendar, fetchAllEvents, findEventById, saveEvent, updateEvent, removeEvent, openEventInCalendar");
+    NSLog(@"🔍 Available methods: requestPermissions, checkPermissions, fetchAllCalendars, findOrCreateCalendar, removeCalendar, fetchAllEvents, findEventById, saveEvent, openEventEditor, updateEvent, removeEvent, openEventInCalendar");
     resolve(@"Methods logged to console");
 }
 
@@ -451,7 +485,337 @@ RCT_EXPORT_METHOD(openEventInCalendar:(NSString *)eventId
     });
 }
 
+// Opens EventKitUI with an unsaved event owned by the system editor
+RCT_EXPORT_METHOD(openEventEditor:(NSDictionary *)eventOptions
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![eventOptions isKindOfClass:[NSDictionary class]]) {
+            reject(@"invalid_event_options", @"Event options must be an object", nil);
+            return;
+        }
+
+        NSString *title = StringOrNil(eventOptions[@"title"]);
+        NSString *startDate = StringOrNil(eventOptions[@"startDate"]);
+        NSString *endDate = StringOrNil(eventOptions[@"endDate"]);
+        NSString *location = StringOrNil(eventOptions[@"location"]);
+        NSString *notes = StringOrNil(eventOptions[@"notes"]);
+        NSString *calendarId = StringOrNil(eventOptions[@"calendar"]);
+        NSNumber *allDay = NumberOrNil(eventOptions[@"allDay"]);
+        if (!title) {
+            reject(@"invalid_event_options", @"Event title must be a string", nil);
+            return;
+        }
+        if (HasValue(eventOptions[@"location"]) && !location) {
+            reject(@"invalid_event_options", @"Event location must be a string", nil);
+            return;
+        }
+        if (HasValue(eventOptions[@"notes"]) && !notes) {
+            reject(@"invalid_event_options", @"Event notes must be a string", nil);
+            return;
+        }
+        if (HasValue(eventOptions[@"calendar"]) && !calendarId) {
+            reject(@"invalid_event_options", @"Calendar ID must be a string", nil);
+            return;
+        }
+        if (HasValue(eventOptions[@"allDay"]) && !allDay) {
+            reject(@"invalid_event_options", @"Event allDay must be a boolean", nil);
+            return;
+        }
+
+        NSDate *parsedStartDate = [self dateFromISO8601String:startDate];
+        NSDate *parsedEndDate = [self dateFromISO8601String:endDate];
+        if (!parsedStartDate || !parsedEndDate) {
+            reject(@"invalid_event_dates", @"Event dates must use ISO 8601 format", nil);
+            return;
+        }
+        if ([parsedEndDate compare:parsedStartDate] == NSOrderedAscending) {
+            reject(@"invalid_event_dates", @"Event end date must not be before its start date", nil);
+            return;
+        }
+
+        void (^presentEditor)(void) = ^{
+            UIViewController *presenter = RCTPresentedViewController();
+            if (!presenter) {
+                reject(@"event_editor_unavailable", @"No view controller can present the calendar editor", nil);
+                return;
+            }
+            if ([presenter isKindOfClass:[EKEventEditViewController class]]) {
+                reject(@"event_editor_busy", @"A calendar editor is already open", nil);
+                return;
+            }
+
+            EKEvent *event = [EKEvent eventWithEventStore:self.eventStore];
+            event.title = title;
+            event.startDate = parsedStartDate;
+            event.endDate = parsedEndDate;
+            event.location = location;
+            event.notes = notes;
+            event.allDay = allDay.boolValue;
+
+            NSString *optionsError = [self applyEditorOptions:eventOptions toEvent:event];
+            if (optionsError) {
+                reject(@"invalid_event_options", optionsError, nil);
+                return;
+            }
+
+            EKEventEditViewController *controller = [[EKEventEditViewController alloc] init];
+            controller.event = event;
+            controller.eventStore = self.eventStore;
+            controller.editViewDelegate = self;
+
+            [presenter presentViewController:controller animated:YES completion:^{
+                resolve(nil);
+            }];
+        };
+
+        if (@available(iOS 17.0, *)) {
+            if (calendarId.length > 0) {
+                [self.eventStore requestFullAccessToEventsWithCompletion:^(BOOL granted, NSError *error) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (error) {
+                            reject(@"permission_error", error.localizedDescription, error);
+                        } else if (!granted) {
+                            reject(@"calendar_permission_denied", @"Full calendar access is required to preselect a calendar", nil);
+                        } else {
+                            presentEditor();
+                        }
+                    });
+                }];
+                return;
+            }
+            presentEditor();
+            return;
+        }
+
+        EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeEvent];
+        if (status == EKAuthorizationStatusAuthorized) {
+            presentEditor();
+            return;
+        }
+        if (status != EKAuthorizationStatusNotDetermined) {
+            reject(@"calendar_permission_denied", @"Calendar access is required to open the event editor on iOS 16 and earlier", nil);
+            return;
+        }
+
+        [self.eventStore requestAccessToEntityType:EKEntityTypeEvent completion:^(BOOL granted, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (error) {
+                    reject(@"permission_error", error.localizedDescription, error);
+                } else if (!granted) {
+                    reject(@"calendar_permission_denied", @"Calendar access is required to open the event editor on iOS 16 and earlier", nil);
+                } else {
+                    presentEditor();
+                }
+            });
+        }];
+    });
+}
+
 #pragma mark - Helper Methods
+
+// Applies shared and iOS-only values before presenting EventKitUI
+- (NSString *)applyEditorOptions:(NSDictionary *)options toEvent:(EKEvent *)event {
+    NSString *calendarId = StringOrNil(options[@"calendar"]);
+    if (calendarId.length > 0) {
+        EKCalendar *calendar = [self.eventStore calendarWithIdentifier:calendarId];
+        if (!calendar) return @"The selected calendar was not found";
+        event.calendar = calendar;
+    } else {
+        event.calendar = self.eventStore.defaultCalendarForNewEvents;
+    }
+
+    NSString *availabilityError = [self applyAvailability:options[@"availability"] toEvent:event allowUnavailable:NO];
+    if (availabilityError) return availabilityError;
+
+    id recurrenceValue = options[@"recurrence"];
+    NSDictionary *recurrence = DictOrNil(recurrenceValue);
+    if (HasValue(recurrenceValue) && !recurrence) return @"Recurrence must be an object";
+    if (recurrence) {
+        NSString *recurrenceError = [self applyRecurrence:recurrence toEvent:event];
+        if (recurrenceError) return recurrenceError;
+    }
+
+    id iosValue = options[@"ios"];
+    NSDictionary *iosOptions = DictOrNil(iosValue);
+    if (HasValue(iosValue) && !iosOptions) return @"iOS options must be an object";
+    if (!iosOptions) return nil;
+
+    id urlValue = iosOptions[@"url"];
+    NSString *url = StringOrNil(urlValue);
+    if (HasValue(urlValue) && !url) return @"iOS event URL must be a string";
+    if (url.length > 0) {
+        NSURL *eventURL = [NSURL URLWithString:url];
+        if (!eventURL.scheme) return @"iOS event URLs must include a valid scheme";
+        event.URL = eventURL;
+    }
+
+    NSString *iosAvailabilityError = [self applyAvailability:iosOptions[@"availability"] toEvent:event allowUnavailable:YES];
+    if (iosAvailabilityError) return iosAvailabilityError;
+
+    id alarmsValue = iosOptions[@"alarms"];
+    NSArray *alarms = ArrayOrNil(alarmsValue);
+    if (HasValue(alarmsValue) && !alarms) return @"iOS alarms must be an array";
+    if (alarms) {
+        NSMutableArray<EKAlarm *> *eventAlarms = [NSMutableArray array];
+        for (id alarmValue in alarms) {
+            NSDictionary *alarmOptions = DictOrNil(alarmValue);
+            if (!alarmOptions) return @"Each iOS alarm must be an object";
+
+            EKAlarm *alarm = nil;
+            id dateValue = alarmOptions[@"date"];
+            id minutesValue = alarmOptions[@"minutes"];
+            NSString *date = StringOrNil(dateValue);
+            NSNumber *minutes = NumberOrNil(minutesValue);
+            if (HasValue(dateValue) && !date) return @"iOS alarm date must be a string";
+            if (HasValue(minutesValue) && !minutes) return @"iOS alarm minutes must be a number";
+            if (HasValue(dateValue) && HasValue(minutesValue)) return @"Each iOS alarm must provide either date or minutes";
+            if (date) {
+                NSDate *parsedDate = [self dateFromISO8601String:date];
+                if (!parsedDate) return @"iOS alarm dates must use ISO 8601 format";
+                alarm = [EKAlarm alarmWithAbsoluteDate:parsedDate];
+            } else if (minutes) {
+                if (minutes.doubleValue < 0) return @"iOS alarm minutes must not be negative";
+                alarm = [EKAlarm alarmWithRelativeOffset:-(minutes.doubleValue * 60)];
+            } else {
+                return @"Each iOS alarm must provide date or minutes";
+            }
+            [eventAlarms addObject:alarm];
+        }
+        event.alarms = eventAlarms;
+    }
+
+    return nil;
+}
+
+// Validates availability values supported by the selected platform scope
+- (NSString *)applyAvailability:(id)availabilityValue
+                         toEvent:(EKEvent *)event
+                allowUnavailable:(BOOL)allowUnavailable {
+    if (!HasValue(availabilityValue)) return nil;
+    NSString *availability = StringOrNil(availabilityValue);
+    if (!availability) return @"Availability must be a string";
+    if ([availability isEqualToString:@"busy"]) {
+        event.availability = EKEventAvailabilityBusy;
+    } else if ([availability isEqualToString:@"free"]) {
+        event.availability = EKEventAvailabilityFree;
+    } else if ([availability isEqualToString:@"tentative"]) {
+        event.availability = EKEventAvailabilityTentative;
+    } else if (allowUnavailable && [availability isEqualToString:@"unavailable"]) {
+        event.availability = EKEventAvailabilityUnavailable;
+    } else {
+        return allowUnavailable
+            ? @"iOS availability must be unavailable"
+            : @"Availability must be busy, free, or tentative";
+    }
+    return nil;
+}
+
+// Builds an EventKit recurrence rule from the shared recurrence shape
+- (NSString *)applyRecurrence:(NSDictionary *)recurrence toEvent:(EKEvent *)event {
+    NSDictionary<NSString *, NSNumber *> *frequencies = @{
+        @"daily": @(EKRecurrenceFrequencyDaily),
+        @"weekly": @(EKRecurrenceFrequencyWeekly),
+        @"monthly": @(EKRecurrenceFrequencyMonthly),
+        @"yearly": @(EKRecurrenceFrequencyYearly),
+    };
+    NSString *frequency = StringOrNil(recurrence[@"frequency"]);
+    NSNumber *frequencyValue = frequency ? frequencies[frequency] : nil;
+    if (!frequencyValue) return @"Recurrence frequency must be daily, weekly, monthly, or yearly";
+
+    id intervalValue = recurrence[@"interval"];
+    NSNumber *intervalNumber = IntegerNumberOrNil(intervalValue);
+    if (HasValue(intervalValue) && !intervalNumber) return @"Recurrence interval must be an integer";
+    NSInteger interval = intervalNumber ? intervalNumber.integerValue : 1;
+    if (interval < 1) return @"Recurrence interval must be greater than zero";
+
+    EKRecurrenceEnd *recurrenceEnd = nil;
+    id endDateValue = recurrence[@"endDate"];
+    id occurrenceValue = recurrence[@"occurrence"];
+    NSString *endDateString = StringOrNil(endDateValue);
+    NSNumber *occurrenceNumber = IntegerNumberOrNil(occurrenceValue);
+    if (HasValue(endDateValue) && !endDateString) return @"Recurrence end date must be a string";
+    if (HasValue(occurrenceValue) && !occurrenceNumber) return @"Recurrence occurrence must be an integer";
+    if (endDateString) {
+        NSDate *endDate = [self dateFromISO8601String:endDateString];
+        if (!endDate) return @"Recurrence end date must use ISO 8601 format";
+        recurrenceEnd = [EKRecurrenceEnd recurrenceEndWithEndDate:endDate];
+    } else if (occurrenceNumber) {
+        NSInteger occurrence = occurrenceNumber.integerValue;
+        if (occurrence < 1) return @"Recurrence occurrence must be greater than zero";
+        recurrenceEnd = [EKRecurrenceEnd recurrenceEndWithOccurrenceCount:occurrence];
+    }
+
+    NSMutableArray<EKRecurrenceDayOfWeek *> *daysOfWeek = nil;
+    id dayOptionsValue = recurrence[@"daysOfWeek"];
+    NSArray *dayOptions = ArrayOrNil(dayOptionsValue);
+    if (HasValue(dayOptionsValue) && !dayOptions) return @"Recurrence daysOfWeek must be an array";
+    if (dayOptions) {
+        daysOfWeek = [NSMutableArray array];
+        for (id dayValue in dayOptions) {
+            NSDictionary *dayOption = DictOrNil(dayValue);
+            if (!dayOption) return @"Each recurrence dayOfWeek must be an object";
+            NSNumber *dayNumber = IntegerNumberOrNil(dayOption[@"dayOfWeek"]);
+            if (!dayNumber) return @"Recurrence dayOfWeek must be an integer";
+            NSInteger day = dayNumber.integerValue;
+            if (day < 1 || day > 7) return @"Recurrence dayOfWeek must be between 1 and 7";
+            id weekNumberValue = dayOption[@"weekNumber"];
+            NSNumber *weekNumberObject = IntegerNumberOrNil(weekNumberValue);
+            if (HasValue(weekNumberValue) && !weekNumberObject) return @"Recurrence weekNumber must be an integer";
+            NSInteger weekNumber = weekNumberObject.integerValue;
+            if (weekNumberObject && (weekNumber == 0 || weekNumber < -53 || weekNumber > 53)) {
+                return @"Recurrence weekNumber must be between -53 and 53 and cannot be zero";
+            }
+            EKRecurrenceDayOfWeek *recurrenceDay = weekNumberObject
+                ? [EKRecurrenceDayOfWeek dayOfWeek:(EKWeekday)day weekNumber:weekNumber]
+                : [EKRecurrenceDayOfWeek dayOfWeek:(EKWeekday)day];
+            [daysOfWeek addObject:recurrenceDay];
+        }
+    }
+
+    id daysOfMonthValue = recurrence[@"daysOfMonth"];
+    id monthsOfYearValue = recurrence[@"monthsOfYear"];
+    id daysOfYearValue = recurrence[@"daysOfYear"];
+    NSString *rangeError = [self validateRecurrenceValues:daysOfMonthValue minimum:-31 maximum:31 disallowZero:YES name:@"daysOfMonth"];
+    if (rangeError) return rangeError;
+    rangeError = [self validateRecurrenceValues:monthsOfYearValue minimum:1 maximum:12 disallowZero:NO name:@"monthsOfYear"];
+    if (rangeError) return rangeError;
+    rangeError = [self validateRecurrenceValues:daysOfYearValue minimum:-366 maximum:366 disallowZero:YES name:@"daysOfYear"];
+    if (rangeError) return rangeError;
+
+    EKRecurrenceRule *rule = [[EKRecurrenceRule alloc]
+        initRecurrenceWithFrequency:(EKRecurrenceFrequency)frequencyValue.integerValue
+        interval:interval
+        daysOfTheWeek:daysOfWeek
+        daysOfTheMonth:ArrayOrNil(daysOfMonthValue)
+        monthsOfTheYear:ArrayOrNil(monthsOfYearValue)
+        weeksOfTheYear:nil
+        daysOfTheYear:ArrayOrNil(daysOfYearValue)
+        setPositions:nil
+        end:recurrenceEnd];
+    event.recurrenceRules = @[rule];
+    return nil;
+}
+
+// Guards EventKit against invalid recurrence ranges from plain JavaScript
+- (NSString *)validateRecurrenceValues:(id)valuesValue
+                                minimum:(NSInteger)minimum
+                                maximum:(NSInteger)maximum
+                           disallowZero:(BOOL)disallowZero
+                                   name:(NSString *)name {
+    if (!HasValue(valuesValue)) return nil;
+    NSArray *values = ArrayOrNil(valuesValue);
+    if (!values) return [NSString stringWithFormat:@"Recurrence %@ must be an array", name];
+    for (id numberValue in values) {
+        NSNumber *number = IntegerNumberOrNil(numberValue);
+        if (!number) return [NSString stringWithFormat:@"Recurrence %@ values must be integers", name];
+        NSInteger value = number.integerValue;
+        if (value < minimum || value > maximum || (disallowZero && value == 0)) {
+            return [NSString stringWithFormat:@"Invalid recurrence value for %@", name];
+        }
+    }
+    return nil;
+}
 
 - (void)applyEventProperties:(NSDictionary *)eventDict toEvent:(EKEvent *)event {
     event.title = eventDict[@"title"];

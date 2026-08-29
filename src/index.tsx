@@ -16,6 +16,36 @@ export interface CalendarEvent {
   calendar?: string;
 }
 
+export type EventEditorAvailability = 'busy' | 'free' | 'tentative';
+
+export type EventEditorAlarm =
+  | { date: string | Date; minutes?: never }
+  | { minutes: number; date?: never };
+
+export interface IOSEventEditorOptions {
+  url?: string;
+  alarms?: EventEditorAlarm[];
+  availability?: 'unavailable';
+}
+
+export interface AndroidEventEditorOptions {
+  attendees?: string[];
+}
+
+export interface EventEditorOptions {
+  title: string;
+  startDate: string | Date;
+  endDate: string | Date;
+  location?: string;
+  notes?: string;
+  allDay?: boolean;
+  calendar?: string;
+  recurrence?: RecurrenceRule;
+  availability?: EventEditorAvailability;
+  ios?: IOSEventEditorOptions;
+  android?: AndroidEventEditorOptions;
+}
+
 export interface CalendarAlarm {
   date?: string | Date;
   structuredLocation?: {
@@ -83,6 +113,11 @@ class CalendarEvents {
       );
     }
     return this.native;
+  }
+
+  // Native modules receive dates as ISO 8601 strings
+  private toISOString(date: string | Date): string {
+    return typeof date === 'string' ? date : date.toISOString();
   }
 
   /**
@@ -215,6 +250,47 @@ class CalendarEvents {
       event.notes || '',
       event.calendar || ''
     );
+  }
+
+  /**
+   * Open the platform calendar editor with a new, unsaved event
+   * Resolves when the editor is presented, not when the event is saved
+   */
+  async openEventEditor(event: EventEditorOptions): Promise<void> {
+    const nativeModule = this.requireNativeModule();
+    if (typeof nativeModule.openEventEditor !== 'function') {
+      throw new Error(
+        'The native calendar editor is unavailable. Rebuild the native app and reinstall it.',
+      );
+    }
+
+    const { ios, android, ...commonOptions } = event;
+    const nativeOptions: Record<string, unknown> = {
+      ...commonOptions,
+      startDate: this.toISOString(event.startDate),
+      endDate: this.toISOString(event.endDate),
+    };
+
+    if (event.recurrence?.endDate) {
+      nativeOptions.recurrence = {
+        ...event.recurrence,
+        endDate: this.toISOString(event.recurrence.endDate),
+      };
+    }
+
+    if (Platform.OS === 'ios' && ios) {
+      nativeOptions.ios = {
+        ...ios,
+        alarms: ios.alarms?.map(alarm => ({
+          ...alarm,
+          ...(alarm.date ? { date: this.toISOString(alarm.date) } : {}),
+        })),
+      };
+    } else if (Platform.OS === 'android' && android) {
+      nativeOptions.android = android;
+    }
+
+    return nativeModule.openEventEditor(nativeOptions);
   }
 
   /**
